@@ -8,14 +8,13 @@ from fastapi import FastAPI
 
 from .server import Server, setup_db
 
-db = None
 power_manager = None
 
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    global db, power_manager
+    global power_manager
 
     db_path = os.environ.get('DB_PATH', 'db.sqlite')
     db = await aiosqlite.connect(db_path)
@@ -32,7 +31,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    await db.close()
+    await power_manager.close()
 
 @app.get("/tokens/update")
 async def update_token(id: Optional[str] = None, expire_in_sec: Optional[int] = None):
