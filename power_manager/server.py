@@ -87,31 +87,43 @@ class Server:
 
     async def loop(self):
         async with self._loop_lock:
-            await self._loop()
+            while self._running:
+                now_sec = int(time.time())
+                await self._check(now_sec)
+                async with self._check_status:
+                    await self._wait_next_check(now_sec)
 
-    async def _loop(self):
-        while self._running:
-            now_sec = int(time.time())
+            if await self.is_online():
+                await self._shutdown()
 
-            if not await self._with_tokens():
-                if self._shutdown_at_sec < now_sec:
-                    if await self.is_online():
-                        await self._shutdown()
-            elif not await self.is_online():
-                self._wake()
-                self._shutdown_at_sec = 0
+            await self._db.close()
 
-            query = 'DELETE FROM tokens WHERE expire_time <= ?'
-            await self._db.execute(query, (now_sec,))
-            await self._db.commit()
+    async def _check(self, now_sec):
+        if not await self._with_tokens():
+            if self._shutdown_at_sec < now_sec:
+                if await self.is_online():
+                    await self._shutdown()
+        elif not await self.is_online():
+            self._wake()
+            self._shutdown_at_sec = 0
 
-            async with self._check_status:
-                await self._wait_next_check(now_sec)
+        query = 'DELETE FROM tokens WHERE expire_time <= ?'
+        await self._db.execute(query, (now_sec,))
+        await self._db.commit()
 
-        if await self.is_online():
-            await self._shutdown()
+    async def _wait_next_check(self, now_sec):
+        timeout = 20
+        if not await self._with_tokens():
+            if await self.is_online():
+                if self._shutdown_at_sec == 0:
+                    self._shutdown_at_sec = now_sec + self._shutdown_after_sec
+            else:
+                timeout = 600
 
-        await self._db.close()
+        try:
+            await asyncio.wait_for(self._check_status.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
 
     async def _with_tokens(self):
         query = 'SELECT id FROM tokens LIMIT 1'
@@ -127,6 +139,8 @@ class Server:
         try:
             s.connect(('255.255.255.255', 9))
             s.send(msg)
+        except OSError:
+            pass
         finally:
             s.close()
 
@@ -142,20 +156,6 @@ class Server:
 
     async def _shutdown(self):
         self._online = await run(f'ssh shutdown-me@{self._host}') != 0
-
-    async def _wait_next_check(self, now_sec):
-        timeout = 20
-        if not await self._with_tokens():
-            if await self.is_online():
-                if self._shutdown_at_sec == 0:
-                    self._shutdown_at_sec = now_sec + self._shutdown_after_sec
-            else:
-                timeout = 600
-
-        try:
-            await asyncio.wait_for(self._check_status.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
 
     async def close(self):
         async with self._check_status:
